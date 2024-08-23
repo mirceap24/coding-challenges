@@ -1,88 +1,114 @@
-import unittest 
-import tempfile 
-import os 
-import sys 
-import subprocess
-from io import StringIO 
-from unittest.mock import patch 
+import unittest
+import tempfile
+import os
+import sys
+from io import StringIO
+from unittest.mock import patch
+from ccwc import count_bytes_lines_words_chars, count_bytes_lines_words_chars_from_stdin, ccwc
 
-from ccwc import count_bytes, count_lines, count_words, count_chars, count_all, count_from_stdin, main
-
-class TestCCWCUtility(unittest.TestCase):
+class TestCCWC(unittest.TestCase):
 
     def setUp(self):
-        # temporary file for testing 
-        self.temp_file = tempfile.NamedTemporaryFile(delete = False)
-        self.temp_filename = self.temp_file.name 
-    
-    def tearDown(self):
+        self.temp_file = tempfile.NamedTemporaryFile(mode = 'w+', delete = False)
+        self.temp_file.write("Hello, world!\nThis is a test file.")
         self.temp_file.close()
-        os.unlink(self.temp_filename)
 
-    def test_count_bytes(self):
-        content = b"Hello\nWorld\n"
-        self.temp_file.write(content)
-        self.temp_file.flush()
-        self.assertEqual(count_bytes(self.temp_filename), len(content))
+        # large temporary file for testing 
+        self.large_temp_file = tempfile.NamedTemporaryFile(mode = 'w+', delete = False)
+        for _ in range(100000):
+            self.large_temp_file.write("This is a long line of text for testing purposes.\n")
+        self.large_temp_file.close()
 
-    def test_count_lines(self):
-        content = "Hello\nWorld\n"
-        with open(self.temp_filename, 'w') as f: 
-            f.write(content)
-        self.assertEqual(count_lines(self.temp_filename), 2)
-    
-    def test_count_words(self):
-        content = "Hello World\nThis is a test\n"
-        with open(self.temp_filename, 'w') as f:
-            f.write(content)
-        self.assertEqual(count_words(self.temp_filename), 6)
-    
-    def test_count_chars(self):
-        content = "Hello World\nThis is a test\n"
-        with open(self.temp_filename, 'w') as f:
-            f.write(content)
-        self.assertEqual(count_chars(self.temp_filename), len(content))
+    def cleanUp(self):
+        os.unlink(self.temp_file.name)
+        os.unlink(self.large_temp_file.name)
 
-    def test_count_all(self):
-        content = "Hello World\nThis is a test\n"
-        with open(self.temp_filename, 'w') as f:
-            f.write(content)
-        lines, words, bytes_count = count_all(self.temp_filename)
-        self.assertEqual(lines, 2)
-        self.assertEqual(words, 6)
-        self.assertEqual(bytes_count, len(content.encode('utf-8')))
+    def test_count_bytes_lines_words_chars(self):
+        # Test the function that counts from a file
+        bytes_count, lines_count, words_count, chars_count = count_bytes_lines_words_chars(self.temp_file.name)
+        self.assertEqual(bytes_count, 34)
+        self.assertEqual(lines_count, 2)
+        self.assertEqual(words_count, 7)
+        self.assertEqual(chars_count, 34)
     
-    @patch('sys.stdin', StringIO("Hello World\nThis is a test"))
-    def test_count_from_stdin(self):
-        lines, words, bytes_count, chars = count_from_stdin()
-        self.assertEqual(lines, 2)
-        self.assertEqual(words, 6)
-        self.assertEqual(bytes_count, 26)
-        self.assertEqual(chars, 26)
+    def test_count_bytes_lines_words_chars_large_file(self):
+        # Test the function with a large file
+        bytes_count, lines_count, words_count, chars_count = count_bytes_lines_words_chars(self.large_temp_file.name)
+        self.assertEqual(lines_count, 100000)
+        self.assertEqual(words_count, 1000000)  # 10 words per line
+        self.assertEqual(chars_count, 5000000)  # 50 characters per line (including newline)
+
+    @patch('sys.stdin', StringIO("Hello, world!\nThis is a test file.\n"))
+    def test_count_bytes_lines_words_chars_from_stdin(self):
+        # Test the function that counts from stdin
+        bytes_count, lines_count, words_count, chars_count = count_bytes_lines_words_chars_from_stdin()
+        self.assertEqual(bytes_count, 35)
+        self.assertEqual(lines_count, 2)
+        self.assertEqual(words_count, 7)
+        self.assertEqual(chars_count, 35)
     
-    def test_large_file_handling(self):
-        # Simulate a large file using the seq and xargs commands
-        # This will simulate a file with 300,000 lines of the content in test.txt
-        seq_cmd = ['seq', '1', '300000']
-        xargs_cmd = ['xargs', '-Inone', 'cat', self.temp_filename]
+    @patch('sys.stdout', new_callable=StringIO)
+    def test_ccwc_with_file(self, mock_stdout):
+        # Test ccwc function with different options for a file
+        ccwc('-c', self.temp_file.name)
+        self.assertEqual(mock_stdout.getvalue().strip(), f"34 {self.temp_file.name}")
+
+        mock_stdout.truncate(0) # clear the content
+        mock_stdout.seek(0) # move cursor at beginning
+
+        ccwc('-l', self.temp_file.name)
+        self.assertEqual(mock_stdout.getvalue().strip(), f"2 {self.temp_file.name}")
+
+        mock_stdout.truncate(0)
+        mock_stdout.seek(0)
+        ccwc('-w', self.temp_file.name)
+        self.assertEqual(mock_stdout.getvalue().strip(), f"7 {self.temp_file.name}")
+
+        mock_stdout.truncate(0)
+        mock_stdout.seek(0)
+        ccwc('-m', self.temp_file.name)
+        self.assertEqual(mock_stdout.getvalue().strip(), f"34 {self.temp_file.name}")
+
+        mock_stdout.truncate(0)
+        mock_stdout.seek(0)
+        ccwc(None, self.temp_file.name)
+        self.assertEqual(mock_stdout.getvalue().strip(), f"2 7 34 {self.temp_file.name}")
+
+    @patch('sys.stdout', new_callable=StringIO)
+    def test_ccwc_with_stdin(self, mock_stdout):
+        # Mock sys.stdin with the input
+        input_data = "Hello, world!\nThis is a test file.\n"
         
-        with open(self.temp_filename, 'w') as f:
-            f.write("Hello World\n")
+        with patch('sys.stdin', StringIO(input_data)):
+            ccwc('-c')
+            self.assertEqual(mock_stdout.getvalue().strip(), "35")
+        
+        mock_stdout.truncate(0)
+        mock_stdout.seek(0)
+        with patch('sys.stdin', StringIO(input_data)):
+            ccwc('-l')
+            self.assertEqual(mock_stdout.getvalue().strip(), "2")
+        
+        mock_stdout.truncate(0)
+        mock_stdout.seek(0)
+        with patch('sys.stdin', StringIO(input_data)):
+            ccwc('-w')
+            self.assertEqual(mock_stdout.getvalue().strip(), "7")
+        
+        mock_stdout.truncate(0)
+        mock_stdout.seek(0)
+        with patch('sys.stdin', StringIO(input_data)):
+            ccwc('-m')
+            self.assertEqual(mock_stdout.getvalue().strip(), "35")
+        
+        mock_stdout.truncate(0)
+        mock_stdout.seek(0)
+        with patch('sys.stdin', StringIO(input_data)):
+            ccwc(None)
+            self.assertEqual(mock_stdout.getvalue().strip(), "2 7 35")
 
-        # Run the command and capture the output using subprocess
-        with subprocess.Popen(seq_cmd, stdout=subprocess.PIPE) as seq_proc:
-            with subprocess.Popen(xargs_cmd, stdin=seq_proc.stdout, stdout=subprocess.PIPE) as xargs_proc:
-                seq_proc.stdout.close()
-                output = xargs_proc.communicate()[0]
+if __name__ == '__main__':
+    unittest.main()
 
-        # Since the test file contains "Hello World\n", there are 2 words and 11 bytes per line.
-        expected_lines = 300000
-        expected_words = expected_lines * 2
-        expected_bytes = expected_lines * len("Hello World\n".encode('utf-8'))
-
-        # Using the functions to count from the generated large content
-        lines, words, bytes_count = count_all(self.temp_filename)
-
-        self.assertEqual(lines, expected_lines)
-        self.assertEqual(words, expected_words)
-        self.assertEqual(bytes_count, expected_bytes)
+if __name__ == '__main__':
+    unittest.main()
