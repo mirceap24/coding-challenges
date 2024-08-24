@@ -3,9 +3,24 @@ import shlex
 import errno 
 import os
 import signal
+import readline 
+import atexit
 
 # Global variable to store the current child process
 current_child_process = None
+HISTORY_FILE = os.path.expanduser("~/.ccsh_history")
+MAX_HISTORY_LINES = 1000
+
+def setup_history():
+    """
+    Set up command history handling
+    """
+    if not os.path.exists(HISTORY_FILE):
+        open(HISTORY_FILE, 'a').close()
+    
+    readline.read_history_file(HISTORY_FILE)
+    readline.set_history_length(MAX_HISTORY_LINES)
+    atexit.register(readline.write_history_file, HISTORY_FILE)
 
 def signal_handler(sig, frame):
     global current_child_process
@@ -61,8 +76,20 @@ def execute_command(command_parts):
         finally:
             current_child_process = None
 
+def display_history():
+    """
+    Display command history
+    """
+    for i in range(1, readline.get_current_history_length() + 1):
+        command = readline.get_history_item(i)
+        if command.strip().lower() != 'history':
+            print(command)
+
 def main():
     prompt = "ccsh> "
+
+    # set up command history
+    setup_history()
 
     # custom signal handler
     signal.signal(signal.SIGINT, signal_handler)
@@ -81,6 +108,8 @@ def main():
                 change_directory(args[0] if args else os.path.expanduser("~"))
             elif command == "pwd":
                 print_working_directory()
+            elif command == "history":
+                display_history()
             else:
                 execute_command(command_parts)
         except EOFError:
