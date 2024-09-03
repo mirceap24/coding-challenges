@@ -19,8 +19,11 @@ def get_bucket(ip):
         
         bucket = token_buckets[ip]
         time_passed = current_time - bucket['last_checked']
-        bucket['tokens'] = min(BUCKET_CAPACITY, bucket['tokens'] + time_passed * TOKENS_PER_SECOND)
-        bucket['last_checked'] = current_time
+
+        if time_passed >= 1: 
+            new_tokens = int(time_passed * TOKENS_PER_SECOND)
+            bucket['tokens'] = min(BUCKET_CAPACITY, bucket['tokens'] + new_tokens)
+            bucket['last_checked'] = current_time
     
     return bucket 
 
