@@ -1,54 +1,57 @@
-from flask import Flask, request, jsonify, make_response
-from time import time 
-import threading 
+import time
+import threading
+from flask import Flask, request, jsonify
+from collections import defaultdict
 
 app = Flask(__name__)
 
-# Token bucket parameters 
-TOKENS_PER_SECOND = 1 
-BUCKET_CAPACITY = 10 
-token_buckets = {} 
+# Token bucket parameters
+BUCKET_CAPACITY = 10
+TOKEN_RATE = 1
+
+# Dictionary to store token buckets for each IP address
+ip_buckets = defaultdict(lambda: {"tokens": BUCKET_CAPACITY, "last_refill_time": time.time()})
+
 lock = threading.Lock()
 
-def get_bucket(ip):
-    current_time = time()
+def refill_tokens(bucket):
+    """
+    Refill the bucket with tokens based on the elapsed time since the last refill.
+    This function is now called during each request to ensure tokens are refilled in real-time.
+    """
+    now = time.time()
+    time_passed = now - bucket["last_refill_time"]
+    new_tokens = int(time_passed * TOKEN_RATE)
+    if new_tokens > 0:
+        bucket["tokens"] = min(bucket["tokens"] + new_tokens, BUCKET_CAPACITY)
+        bucket["last_refill_time"] = now
 
-    with lock: # thread safe access to token_buckets
-        if ip not in token_buckets: 
-            token_buckets[ip] = {"tokens": BUCKET_CAPACITY, "last_checked": current_time}
-        
-        bucket = token_buckets[ip]
-        time_passed = current_time - bucket['last_checked']
+def consume_token(bucket):
+    """
+    Attempt to consume a token from the bucket.
+    This function is now responsible for refilling tokens before consuming.
+    Returns True if successful (token available), False if no tokens are available.
+    """
+    with lock:
+        refill_tokens(bucket)  # make sure tokens are refilled before consumption
+        if bucket["tokens"] > 0:
+            bucket["tokens"] -= 1
+            return True
+        return False
 
-        if time_passed >= 1: 
-            new_tokens = int(time_passed * TOKENS_PER_SECOND)
-            bucket['tokens'] = min(BUCKET_CAPACITY, bucket['tokens'] + new_tokens)
-            bucket['last_checked'] = current_time
-    
-    return bucket 
-
-def allow_request(ip):
-    bucket = get_bucket(ip)
-
-    with lock: 
-        if bucket['tokens'] >= 1: 
-            bucket['tokens'] -= 1
-            return True 
-        else: 
-            return False 
-
-@app.route('/unlimited', methods = ['GET'])
+@app.route('/unlimited')
 def unlimited():
-    return "Unlimited! Let's Go!", 200 
+    return "Unlimited! Let's Go!"
 
-@app.route('/limited', methods = ['GET'])
+@app.route('/limited')
 def limited():
     ip = request.remote_addr
+    bucket = ip_buckets[ip]
 
-    if allow_request(ip):
-        return "Limited, don't over use me!", 200 
-    else: 
-        return jsonify({"error": "Too many requests"}), 429 
+    if consume_token(bucket):
+        return "Limited, don't overuse me!"
+    else:
+        return jsonify({"error": "Too many requests"}), 429
 
 if __name__ == '__main__':
-    app.run(host = '127.0.0.1', port = 8080)
+    app.run(host='127.0.0.1', port=8080)
