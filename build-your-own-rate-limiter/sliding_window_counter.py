@@ -75,7 +75,6 @@ class SlidingWindowCounterRateLimiter:
         with self.lock:
             counters = self.get_or_create_counters(ip)
             current_time = time.time()
-            current_window = self.get_current_window()
 
             # calculate how far into the current window we are
             time_in_current_window = current_time % self.window_size
