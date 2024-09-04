@@ -107,28 +107,6 @@ void handle_client(int client_socket, const char *path) {
     close(client_socket);
 }
 
-void sanitize_path(char *path) {
-    char *p = path;
-    while (*p) {
-        if (strncmp(p, "/../", 4) == 0) {
-            // Skip over the "/../" sequence
-            memmove(p, p + 3, strlen(p + 3) + 1);
-        } else {
-            p++;
-        }
-    }
-
-    // Also check if it starts with "../"
-    if (strncmp(path, "../", 3) == 0) {
-        memmove(path, path + 3, strlen(path + 3) + 1);
-    }
-
-    // Ensure the path doesn't try to go above the web root
-    if (strstr(path, "..")) {
-        strcpy(path, "/"); // Reset to root if suspicious path is detected
-    }
-}
-
 // Example usage inside add_request_to_queue:
 void add_request_to_queue(int client_socket, const char *path) {
     pthread_mutex_lock(&request_queue.mutex);
@@ -140,9 +118,6 @@ void add_request_to_queue(int client_socket, const char *path) {
     Request req = { .client_socket = client_socket, .file_size = 0 };
     strncpy(req.path, path, sizeof(req.path) - 1);
     req.path[sizeof(req.path) - 1] = '\0';
-
-    // Sanitize the requested path
-    sanitize_path(req.path);
 
     // Get the file size for SFF scheduling
     struct stat file_stat;
