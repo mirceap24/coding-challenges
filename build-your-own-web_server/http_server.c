@@ -6,11 +6,14 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <limits.h>
+#include <ctype.h>
 
 #define PORT 8080
 #define BUFFER_SIZE 1024
 #define MAX_QUEUE_SIZE 100
 #define MAX_PATH_LENGTH 1024
+#define MAX_FILE_SIZE 10485760 // 10 MB
 
 typedef enum {
     FIFO,
@@ -54,13 +57,14 @@ int compare_requests(const void *a, const void *b) {
 }
 
 // Sends an HTTP response to the client, including status code and content
-void send_response(int client_socket, const char *status, const char *content, size_t content_length) {
+void send_response(int client_socket, const char *status, const char *content_type, const char *content, size_t content_length) {
     char header[BUFFER_SIZE];
     int header_length = snprintf(header, sizeof(header),
         "HTTP/1.1 %s\r\n"
+        "Content-Type: %s\r\n"
         "Content-Length: %zu\r\n"
         "\r\n",
-        status, content_length);
+        status, content_type, content_length);
 
     if (send(client_socket, header, header_length, 0) < 0 ||
         send(client_socket, content, content_length, 0) < 0) {
@@ -68,46 +72,127 @@ void send_response(int client_socket, const char *status, const char *content, s
     }
 }
 
-// Handles the client's request by sending the requested file or 404 response
-void handle_client(int client_socket, const char *path) {
-    char full_path[MAX_PATH_LENGTH];
+// Function to sanitize and validate the requested path
+char* sanitize_path(const char* path) {
+    char full_path[4096];
     snprintf(full_path, sizeof(full_path), "www%s", path);
+
+    char* real_path = realpath(full_path, NULL);
+    if (real_path == NULL) {
+        return NULL;
+    }
+    
+    char* www_dir = realpath("www", NULL);
+    if (www_dir == NULL) {
+        free(real_path);
+        return NULL;
+    }
+    
+    if (strncmp(real_path, www_dir, strlen(www_dir)) != 0) {
+        free(real_path);
+        free(www_dir);
+        return NULL;
+    }
+    
+    free(www_dir);
+    return real_path;
+}
+
+// Function to determine MIME type based on file extension
+const char* get_mime_type(const char *path) {
+    const char *ext = strrchr(path, '.');
+    if (ext == NULL) {
+        return "application/octet-stream";
+    }
+    ext++;  // Move past the dot
+
+    if (strcasecmp(ext, "html") == 0 || strcasecmp(ext, "htm") == 0) return "text/html";
+    if (strcasecmp(ext, "txt") == 0) return "text/plain";
+    if (strcasecmp(ext, "jpg") == 0 || strcasecmp(ext, "jpeg") == 0) return "image/jpeg";
+    if (strcasecmp(ext, "png") == 0) return "image/png";
+    if (strcasecmp(ext, "gif") == 0) return "image/gif";
+    if (strcasecmp(ext, "css") == 0) return "text/css";
+    if (strcasecmp(ext, "js") == 0) return "application/javascript";
+
+    return "application/octet-stream";
+}
+
+// Handles the client's request by sending the requested file or appropriate error response
+void handle_client(int client_socket, const char *path) {
+    // Sanitize and validate the path
+    char *safe_path = sanitize_path(path);
+    if (safe_path == NULL) {
+        const char *forbidden_content = "<html><body><h1>403 Forbidden</h1></body></html>";
+        send_response(client_socket, "403 Forbidden", "text/html", forbidden_content, strlen(forbidden_content));
+        close(client_socket);
+        return;
+    }
 
     // If the root path is requested, serve index.html
     if (strcmp(path, "/") == 0) {
-        strcpy(full_path, "www/index.html");
+        free(safe_path);
+        safe_path = sanitize_path("/index.html");
+        if (safe_path == NULL) {
+            const char *not_found_content = "<html><body><h1>404 Not Found</h1></body></html>";
+            send_response(client_socket, "404 Not Found", "text/html", not_found_content, strlen(not_found_content));
+            close(client_socket);
+            return;
+        }
     }
 
-    FILE *file = fopen(full_path, "rb");
+    // Check if the file exists
+    if (access(safe_path, F_OK) != 0) {
+        const char *not_found_content = "<html><body><h1>404 Not Found</h1></body></html>";
+        send_response(client_socket, "404 Not Found", "text/html", not_found_content, strlen(not_found_content));
+        free(safe_path);
+        close(client_socket);
+        return;
+    }
+
+    // Open and serve the file
+    FILE *file = fopen(safe_path, "rb");
     if (!file) {
         const char *not_found_content = "<html><body><h1>404 Not Found</h1></body></html>";
-        send_response(client_socket, "404 Not Found", not_found_content, strlen(not_found_content));
+        send_response(client_socket, "404 Not Found", "text/html", not_found_content, strlen(not_found_content));
     } else {
         fseek(file, 0, SEEK_END);
         long file_size = ftell(file);
         rewind(file);
 
+        if (file_size > MAX_FILE_SIZE) {
+            const char *too_large_content = "<html><body><h1>413 Content Too Large</h1></body></html>";
+            send_response(client_socket, "413 Content Too Large", "text/html", too_large_content, strlen(too_large_content));
+            fclose(file);
+            free(safe_path);
+            close(client_socket);
+            return;
+        }
+
         char *buffer = malloc(file_size);
         if (!buffer) {
             fclose(file);
+            free(safe_path);
             error("Memory allocation failed");
         }
 
         if (fread(buffer, 1, file_size, file) != (size_t)file_size) {
             free(buffer);
             fclose(file);
+            free(safe_path);
             error("File read failed");
         }
 
         fclose(file);
-        send_response(client_socket, "200 OK", buffer, file_size);
+        const char *mime_type = get_mime_type(safe_path);
+        send_response(client_socket, "200 OK", mime_type, buffer, file_size);
         free(buffer);
     }
 
+    free(safe_path);
     close(client_socket);
 }
 
-// Example usage inside add_request_to_queue:
+// Add a request to the queue
 void add_request_to_queue(int client_socket, const char *path) {
     pthread_mutex_lock(&request_queue.mutex);
 
@@ -121,10 +206,10 @@ void add_request_to_queue(int client_socket, const char *path) {
 
     // Get the file size for SFF scheduling
     struct stat file_stat;
-    char full_path[MAX_PATH_LENGTH];
-    snprintf(full_path, sizeof(full_path), "www%s", req.path);
-    if (stat(full_path, &file_stat) == 0) {
+    char *safe_path = sanitize_path(path);
+    if (safe_path != NULL && stat(safe_path, &file_stat) == 0) {
         req.file_size = file_stat.st_size;
+        free(safe_path);
     }
 
     request_queue.queue[request_queue.size++] = req;
@@ -236,6 +321,7 @@ int main(int argc, char *argv[]) {
         }
         buffer[bytes_received] = '\0';
 
+        // Parse the HTTP request
         char method[8], path[MAX_PATH_LENGTH], version[16];
         if (sscanf(buffer, "%7s %1023s %15s", method, path, version) != 3) {
             fprintf(stderr, "Failed to parse request\n");
