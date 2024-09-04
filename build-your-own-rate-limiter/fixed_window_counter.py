@@ -1,69 +1,103 @@
-# This algorithm tracks the number of requests in fixed time windows (e.g, 60-second windows)
-# and limits the number of requests that can be made within each window
-
-from math import floor 
-from flask import Flask, request, jsonify 
-from time import time 
-import threading 
+import time
+import threading
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
 class FixedWindowRateLimiter: 
-    def __init__(self, window_size, request_limit):
-        self.window_size = window_size 
-        self.request_limit = request_limit
-        self.request_counters = {}
+    def __init__(self, window_size, max_requests):
+        """
+        Initialize the FixedWindowRateLimiter with a window size and a request threshold.
+
+        Args:
+        - window_size: Duration of each time window in seconds.
+        - max_requests: Maximum number of allowed requests in a single window.
+        """
+        self.window_size = window_size  # Length of each window in seconds (e.g., 60 seconds)
+        self.max_requests = max_requests    # Maximum allowed requests per window
+        self.ip_counters = {}   # Dictionary to store counters for each IP
         self.lock = threading.Lock()
     
-    def get_window_start_time(self):
+    def get_current_window(self):
         """
-        Returns the start time of the current window.
+        Calculate the current time window based on the floor of the current timestamp.
+
+        Returns:
+        - current_window: The current window timestamp (floor based on window_size).
         """
-        current_time = time()
-        return floor(current_time / self.window_size) * self.window_size
+        return int(time.time() // self.window_size)
+
+    def get_or_create_counter(self, ip):
+        """
+        Get the request counter for a specific IP address and the current time window. If it doesn't exist, create one.
+
+        Args:
+        - ip: The IP address of the incoming request.
+
+        Returns:
+        - counter: The request counter for the given IP address and current window.
+        """
+        current_window = self.get_current_window()
+
+        if ip not in self.ip_counters:
+            # If the IP has no entry, initialize it with the current window and count of 0
+            self.ip_counters[ip] = {"window": current_window, "count": 0}
+        
+        # if the current window is different from the one stored, reset the counter
+        if self.ip_counters[ip]["window"] != current_window:
+            self.ip_counters[ip]["window"] = current_window
+            self.ip_counters[ip]["count"] = 0
+        
+        return self.ip_counters[ip]
     
-    def allow_request(self, ip):
+    def is_request_allowed(self, ip):
         """
-        Determines if a request is allowed based on the current window and the request limit.
-        """
-        current_window = self.get_window_start_time()
+        Determine if a request is allowed based on the fixed window rate limiting.
 
+        Args:
+        - ip: The IP address of the incoming request.
+
+        Returns:
+        - True if the request is allowed (under the threshold), False otherwise.
+        """
         with self.lock: 
-            if ip not in self.request_counters: 
-                self.request_counters[ip] = {"window": current_window, "count": 0}
-            
-            counter = self.request_counters[ip]
+            counter = self.get_or_create_counter(ip)
 
-            # if the request is in a new window, reset counter 
-            if counter["window"] != current_window: 
-                counter["window"] = current_window
-                counter["count"] = 0 
-            
-            # increment counter and check if the request is allowed 
-            if counter["count"] < self.request_limit: 
+            if counter["count"] < self.max_requests:
                 counter["count"] += 1 
                 return True 
-            else: 
-                return False
 
-# Initialize the FixedWindowRateLimiter with the desired window size and request limit
-WINDOW_SIZE = 60  # 60 seconds window
-REQUEST_LIMIT = 60  # 60 requests per window
+            return False 
 
-rate_limiter = FixedWindowRateLimiter(WINDOW_SIZE, REQUEST_LIMIT)
+# Fixed window parameters
+WINDOW_SIZE = 60   # Window size in seconds (e.g., 60 seconds)
+MAX_REQUESTS = 60  # Maximum allowed requests in a single window
 
-@app.route('/unlimited', methods=['GET'])
-def unlimited():
-    return "Unlimited! Let's Go!", 200
+# Instantiate the rate limiter with the defined parameters
+rate_limiter = FixedWindowRateLimiter(WINDOW_SIZE, MAX_REQUESTS)
 
-@app.route('/limited', methods=['GET'])
-def limited():
-    ip = request.remote_addr
+# Define the Flask route that is rate-limited using the fixed window counter algorithm
+@app.route('/limited')
+def fixed_window_limited():
+    """
+    A route that applies rate limiting using the fixed window counter algorithm.
 
-    if rate_limiter.allow_request(ip):
-        return "Limited, don't overuse me!", 200
+    Returns:
+    - A success message if the request is allowed.
+    - A 429 error response if the rate limit is exceeded.
+    """
+    ip = request.remote_addr  # Get the IP address of the requester
+    if rate_limiter.is_request_allowed(ip):
+        # If the request is allowed (under the limit), return a success message
+        return "Request succeeded!"
     else:
+        # Return a rate limit exceeded message with a 429 HTTP status if the threshold is exceeded
         return jsonify({"error": "Too many requests"}), 429
 
+
+# Run the Flask app when this script is executed
 if __name__ == '__main__':
+    """
+    Start the Flask development server, making it accessible locally at port 8080.
+    """
     app.run(host='127.0.0.1', port=8080)
