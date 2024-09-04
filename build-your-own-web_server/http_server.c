@@ -2,195 +2,175 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <arpa/inet.h>  // For socket functions
-#include <pthread.h>    // For multi-threading
-#include <sys/stat.h>   // For file existence check
-#include <fcntl.h>      // For file operations
+#include <arpa/inet.h>
+#include <pthread.h>
+#include <sys/stat.h>
 
 #define PORT 8080
-#define LOCALHOST "127.0.0.1"
-#define WWW_DIR "www"   // directory where HTML files are stored
-#define MAX_QUEUE_SIZE 10   // Maximum number of pending connections in the queue
-#define WORKER_THREADS 10   // Number of worker threads
+#define BUFFER_SIZE 1024
+#define QUEUE_SIZE 10
+#define THREAD_POOL_SIZE 5
 
-void *worker_thread(void *arg);
-void serve_file(int client_socket, const char *file_path);
-void send_404(int client_socket);
+// Circular queue to hold client socket file descriptors
+typedef struct {
+    int clients[QUEUE_SIZE];
+    int front;
+    int rear;
+    int count;
+    pthread_mutex_t mutex;
+    pthread_cond_t not_empty;  // Condition variable to signal when the queue is not empty
+    pthread_cond_t not_full;   // Condition variable to signal when the queue is not full
+} client_queue_t;
 
-// Shared task queue and synchronization structures
-int client_queue[MAX_QUEUE_SIZE];
-int queue_count = 0;
-int queue_front = 0;
-int queue_rear = 0;
+client_queue_t queue = {
+    .front = 0,
+    .rear = 0,
+    .count = 0,
+    .mutex = PTHREAD_MUTEX_INITIALIZER,
+    .not_empty = PTHREAD_COND_INITIALIZER,
+    .not_full = PTHREAD_COND_INITIALIZER
+};
 
-pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t cond_producer = PTHREAD_COND_INITIALIZER;
-pthread_cond_t cond_consumer = PTHREAD_COND_INITIALIZER;
+// Function to add a client to the queue
+void enqueue(int client_fd) {
+    pthread_mutex_lock(&queue.mutex);
 
-// Function to enqueue a client socket
-void enqueue(int client_socket) {
-    pthread_mutex_lock(&queue_mutex);
-    
-    while (queue_count == MAX_QUEUE_SIZE) {
-        // Wait if the queue is full
-        pthread_cond_wait(&cond_producer, &queue_mutex);
+    // Wait until the queue has space
+    while (queue.count == QUEUE_SIZE) {
+        pthread_cond_wait(&queue.not_full, &queue.mutex);
     }
 
-    client_queue[queue_rear] = client_socket;
-    queue_rear = (queue_rear + 1) % MAX_QUEUE_SIZE;
-    queue_count++;
+    // Add client to the queue
+    queue.clients[queue.rear] = client_fd;
+    queue.rear = (queue.rear + 1) % QUEUE_SIZE;
+    queue.count++;
 
-    pthread_cond_signal(&cond_consumer);
-    pthread_mutex_unlock(&queue_mutex);
+    // Signal that the queue is not empty
+    pthread_cond_signal(&queue.not_empty);
+    pthread_mutex_unlock(&queue.mutex);
 }
 
-// Function to dequeue a client socket
+// Function to remove a client from the queue
 int dequeue() {
-    pthread_mutex_lock(&queue_mutex);
+    pthread_mutex_lock(&queue.mutex);
 
-    while (queue_count == 0) {
-        // Wait if the queue is empty
-        pthread_cond_wait(&cond_consumer, &queue_mutex);
+    // Wait until the queue has clients
+    while (queue.count == 0) {
+        pthread_cond_wait(&queue.not_empty, &queue.mutex);
     }
 
-    int client_socket = client_queue[queue_front];
-    queue_front = (queue_front + 1) % MAX_QUEUE_SIZE;
-    queue_count--;
+    // Remove client from the queue
+    int client_fd = queue.clients[queue.front];
+    queue.front = (queue.front + 1) % QUEUE_SIZE;
+    queue.count--;
 
-    pthread_cond_signal(&cond_producer);
-    pthread_mutex_unlock(&queue_mutex);
+    // Signal that the queue is not full
+    pthread_cond_signal(&queue.not_full);
+    pthread_mutex_unlock(&queue.mutex);
 
-    return client_socket;
+    return client_fd;
 }
 
-int main() {
-    // Create worker threads
-    pthread_t workers[WORKER_THREADS];
-    for (int i = 0; i < WORKER_THREADS; i++) {
-        pthread_create(&workers[i], NULL, worker_thread, NULL);
-    }
+// Function to serve the requested file to the client
+void serve_file(int client_fd, const char *path) {
+    FILE *file = fopen(path, "r");
+    if (file == NULL) {
+        // File not found, return 404
+        const char *not_found = "HTTP/1.1 404 Not Found\r\n\r\n404 Not Found";
+        write(client_fd, not_found, strlen(not_found));
+    } else {
+        // File found, send HTTP response with file contents
+        const char *header = "HTTP/1.1 200 OK\r\n\r\n";
+        write(client_fd, header, strlen(header));
 
-    // Create the server socket
-    int server_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_socket == -1) {
-        perror("Could not create socket");
-        return 1;
-    }
-
-    // Bind the socket to an IP/port
-    struct sockaddr_in server_address;
-    server_address.sin_family = AF_INET;
-    server_address.sin_addr.s_addr = inet_addr(LOCALHOST);
-    server_address.sin_port = htons(PORT);
-
-    if (bind(server_socket, (struct sockaddr*)&server_address, sizeof(server_address)) < 0) {
-        perror("Bind failed");
-        return 1;
-    }
-
-    // Start listening for connections
-    if (listen(server_socket, 10) < 0) {
-        perror("Listen failed");
-        return 1;
-    }
-
-    // Accept connections and enqueue them for worker threads
-    int client_socket;
-    struct sockaddr_in client_address;
-    socklen_t client_len = sizeof(client_address);
-
-    while (1) {
-        client_socket = accept(server_socket, (struct sockaddr*)&client_address, &client_len);
-        if (client_socket < 0) {
-            perror("Accept failed");
-            continue;
+        char file_buffer[BUFFER_SIZE];
+        while (fgets(file_buffer, sizeof(file_buffer), file) != NULL) {
+            write(client_fd, file_buffer, strlen(file_buffer));
         }
-
-        // Enqueue the client socket for the worker threads to process
-        enqueue(client_socket);
+        fclose(file);
     }
-
-    close(server_socket);
-    return 0;
 }
 
-// Worker thread function that handles client requests
-void *worker_thread(void *arg) {
+// Worker function for threads to handle client requests
+void *handle_client(void *arg) {
     while (1) {
-        // Dequeue a client socket
-        int client_socket = dequeue();
+        int client_fd = dequeue();
 
-        // Receive data from client
-        char request_buffer[1024];
-        ssize_t bytes_received = recv(client_socket, request_buffer, sizeof(request_buffer) - 1, 0);
-        if (bytes_received < 0) {
-            perror("Receive failed");
-            close(client_socket);
-            continue;
-        }
-        request_buffer[bytes_received] = '\0';
+        char buffer[BUFFER_SIZE];
+        read(client_fd, buffer, sizeof(buffer));
+        printf("Received request:\n%s\n", buffer);
 
-        // Parse request to extract the requested path
-        char method[10], path[1024], http_version[10];
-        sscanf(request_buffer, "%s %s %s", method, path, http_version);
+        // Parse the request line (assuming well-formed input)
+        char method[16], path[1024], http_version[16];
+        sscanf(buffer, "%s %s %s", method, path, http_version);
 
-        // If path is "/", serve "index.html"
+        // Handle root path as /index.html
         if (strcmp(path, "/") == 0) {
-            strcpy(path, "/index.html");
-        }
-
-        // Serve the file if it exists, otherwise send 404
-        char file_path[2048];
-        snprintf(file_path, sizeof(file_path), "%s%s", WWW_DIR, path); // concatenate "www" and the requested path
-
-        struct stat st;
-        if (stat(file_path, &st) == 0) {
-            // File exists, serve it
-            serve_file(client_socket, file_path);
+            strcpy(path, "./www/index.html");
         } else {
-            // File does not exist, send 404 not Found
-            send_404(client_socket);
+            // Construct the file path from the request
+            char temp_path[1048];
+            snprintf(temp_path, sizeof(temp_path), "./www%s", path);
+            strcpy(path, temp_path);
         }
 
-        close(client_socket);  // Close the connection after processing
+        // Serve the file if it exists
+        serve_file(client_fd, path);
+
+        close(client_fd);
     }
     return NULL;
 }
 
-// Function to serve a file
-void serve_file(int client_socket, const char *file_path) {
-    // Open the requested file
-    FILE *file = fopen(file_path, "r");
-    if (file == NULL) {
-        // If file can't be opened, send 404 error
-        send_404(client_socket);
-        return;
+int main() {
+    int server_fd, client_fd;
+    struct sockaddr_in server_addr, client_addr;
+    socklen_t addrlen = sizeof(client_addr);
+
+    // Create socket
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd == 0) {
+        perror("Socket creation failed");
+        exit(EXIT_FAILURE);
     }
 
-    // Send HTTP 200 OK header (before sending the file content)
-    char response[] = "HTTP/1.1 200 OK\r\n"
-                      "Content-Type: text/html\r\n"
-                      "Connection: close\r\n"
-                      "\r\n";
-    send(client_socket, response, strlen(response), 0);
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(PORT);
 
-    // Read and send the file contents
-    char file_buffer[1024];
-    size_t bytes_read;
-    while ((bytes_read = fread(file_buffer, 1, sizeof(file_buffer), file)) > 0) {
-        send(client_socket, file_buffer, bytes_read, 0);
+    // Bind the socket to the port
+    if (bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        perror("Bind failed");
+        close(server_fd);
+        exit(EXIT_FAILURE);
     }
 
-    // Close the file after serving
-    fclose(file);
-}
+    // Listen for incoming connections
+    if (listen(server_fd, 3) < 0) {
+        perror("Listen failed");
+        close(server_fd);
+        exit(EXIT_FAILURE);
+    }
 
-// Function to send a 404 Not Found response
-void send_404(int client_socket) {
-    // Send HTTP 404 header and response
-    char response[] = "HTTP/1.1 404 Not Found\r\n"
-                      "Content-Type: text/html\r\n"
-                      "Connection: close\r\n"
-                      "\r\n";
-    send(client_socket, response, strlen(response), 0);
+    // Create a pool of worker threads
+    pthread_t thread_pool[THREAD_POOL_SIZE];
+    for (int i = 0; i < THREAD_POOL_SIZE; i++) {
+        pthread_create(&thread_pool[i], NULL, handle_client, NULL);
+    }
+
+    printf("Server is listening on port %d...\n", PORT);
+
+    // Accept connections and enqueue them
+    while (1) {
+        client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &addrlen);
+        if (client_fd < 0) {
+            perror("Accept failed");
+            continue;
+        }
+        enqueue(client_fd);  // Add client to the queue for workers to handle
+    }
+
+    
+    close(server_fd);
+    return 0;
 }
