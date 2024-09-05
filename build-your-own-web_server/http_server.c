@@ -13,7 +13,6 @@
 #define BUFFER_SIZE 1024
 #define MAX_QUEUE_SIZE 100
 #define MAX_PATH_LENGTH 1024
-#define MAX_FILE_SIZE 10485760 // 10 MB
 
 typedef enum {
     FIFO,
@@ -43,20 +42,17 @@ RequestQueue request_queue = {
     .policy = FIFO
 };
 
-// Helper function to handle errors
 void error(const char *msg) {
     perror(msg);
     exit(EXIT_FAILURE);
 }
 
-// Function to compare requests based on file size (for SFF scheduling)
 int compare_requests(const void *a, const void *b) {
     const Request *req1 = (const Request *)a;
     const Request *req2 = (const Request *)b;
     return req1->file_size - req2->file_size;
 }
 
-// Sends an HTTP response to the client, including status code and content
 void send_response(int client_socket, const char *status, const char *content_type, const char *content, size_t content_length) {
     char header[BUFFER_SIZE];
     int header_length = snprintf(header, sizeof(header),
@@ -72,7 +68,6 @@ void send_response(int client_socket, const char *status, const char *content_ty
     }
 }
 
-// Function to sanitize and validate the requested path
 char* sanitize_path(const char* path) {
     char full_path[4096];
     snprintf(full_path, sizeof(full_path), "www%s", path);
@@ -98,28 +93,7 @@ char* sanitize_path(const char* path) {
     return real_path;
 }
 
-// Function to determine MIME type based on file extension
-const char* get_mime_type(const char *path) {
-    const char *ext = strrchr(path, '.');
-    if (ext == NULL) {
-        return "application/octet-stream";
-    }
-    ext++;  // Move past the dot
-
-    if (strcasecmp(ext, "html") == 0 || strcasecmp(ext, "htm") == 0) return "text/html";
-    if (strcasecmp(ext, "txt") == 0) return "text/plain";
-    if (strcasecmp(ext, "jpg") == 0 || strcasecmp(ext, "jpeg") == 0) return "image/jpeg";
-    if (strcasecmp(ext, "png") == 0) return "image/png";
-    if (strcasecmp(ext, "gif") == 0) return "image/gif";
-    if (strcasecmp(ext, "css") == 0) return "text/css";
-    if (strcasecmp(ext, "js") == 0) return "application/javascript";
-
-    return "application/octet-stream";
-}
-
-// Handles the client's request by sending the requested file or appropriate error response
 void handle_client(int client_socket, const char *path) {
-    // Sanitize and validate the path
     char *safe_path = sanitize_path(path);
     if (safe_path == NULL) {
         const char *forbidden_content = "<html><body><h1>403 Forbidden</h1></body></html>";
@@ -128,7 +102,6 @@ void handle_client(int client_socket, const char *path) {
         return;
     }
 
-    // If the root path is requested, serve index.html
     if (strcmp(path, "/") == 0) {
         free(safe_path);
         safe_path = sanitize_path("/index.html");
@@ -140,7 +113,6 @@ void handle_client(int client_socket, const char *path) {
         }
     }
 
-    // Check if the file exists
     if (access(safe_path, F_OK) != 0) {
         const char *not_found_content = "<html><body><h1>404 Not Found</h1></body></html>";
         send_response(client_socket, "404 Not Found", "text/html", not_found_content, strlen(not_found_content));
@@ -149,7 +121,6 @@ void handle_client(int client_socket, const char *path) {
         return;
     }
 
-    // Open and serve the file
     FILE *file = fopen(safe_path, "rb");
     if (!file) {
         const char *not_found_content = "<html><body><h1>404 Not Found</h1></body></html>";
@@ -158,15 +129,6 @@ void handle_client(int client_socket, const char *path) {
         fseek(file, 0, SEEK_END);
         long file_size = ftell(file);
         rewind(file);
-
-        if (file_size > MAX_FILE_SIZE) {
-            const char *too_large_content = "<html><body><h1>413 Content Too Large</h1></body></html>";
-            send_response(client_socket, "413 Content Too Large", "text/html", too_large_content, strlen(too_large_content));
-            fclose(file);
-            free(safe_path);
-            close(client_socket);
-            return;
-        }
 
         char *buffer = malloc(file_size);
         if (!buffer) {
@@ -183,8 +145,7 @@ void handle_client(int client_socket, const char *path) {
         }
 
         fclose(file);
-        const char *mime_type = get_mime_type(safe_path);
-        send_response(client_socket, "200 OK", mime_type, buffer, file_size);
+        send_response(client_socket, "200 OK", "text/html", buffer, file_size);
         free(buffer);
     }
 
@@ -192,7 +153,6 @@ void handle_client(int client_socket, const char *path) {
     close(client_socket);
 }
 
-// Add a request to the queue
 void add_request_to_queue(int client_socket, const char *path) {
     pthread_mutex_lock(&request_queue.mutex);
 
@@ -204,7 +164,6 @@ void add_request_to_queue(int client_socket, const char *path) {
     strncpy(req.path, path, sizeof(req.path) - 1);
     req.path[sizeof(req.path) - 1] = '\0';
 
-    // Get the file size for SFF scheduling
     struct stat file_stat;
     char *safe_path = sanitize_path(path);
     if (safe_path != NULL && stat(safe_path, &file_stat) == 0) {
@@ -218,7 +177,6 @@ void add_request_to_queue(int client_socket, const char *path) {
     pthread_mutex_unlock(&request_queue.mutex);
 }
 
-// Worker thread function that processes requests
 void *worker_thread(void *arg) {
     while (1) {
         pthread_mutex_lock(&request_queue.mutex);
@@ -232,7 +190,6 @@ void *worker_thread(void *arg) {
             request = request_queue.queue[0];
             memmove(&request_queue.queue[0], &request_queue.queue[1], (request_queue.size - 1) * sizeof(Request));
         } else {
-            // Sort the queue by file size for SFF scheduling
             qsort(request_queue.queue, request_queue.size, sizeof(Request), compare_requests);
             request = request_queue.queue[0];
             memmove(&request_queue.queue[0], &request_queue.queue[1], (request_queue.size - 1) * sizeof(Request));
@@ -243,7 +200,6 @@ void *worker_thread(void *arg) {
         pthread_cond_signal(&request_queue.not_full);
         pthread_mutex_unlock(&request_queue.mutex);
 
-        // Process the request by sending the file to the client
         handle_client(request.client_socket, request.path);
     }
 
@@ -261,7 +217,6 @@ int main(int argc, char *argv[]) {
         error("Invalid number of workers");
     }
 
-    // Set the scheduling policy based on user input
     if (strcmp(argv[2], "FIFO") == 0) {
         request_queue.policy = FIFO;
     } else if (strcmp(argv[2], "SFF") == 0) {
@@ -293,7 +248,6 @@ int main(int argc, char *argv[]) {
 
     printf("Server is listening on port %d with %d worker threads...\n", PORT, num_workers);
 
-    // Create worker threads
     pthread_t worker_threads[num_workers];
     for (int i = 0; i < num_workers; i++) {
         if (pthread_create(&worker_threads[i], NULL, worker_thread, NULL) != 0) {
@@ -301,7 +255,6 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Accept and process incoming client connections
     while (1) {
         struct sockaddr_in client_addr;
         socklen_t client_addr_len = sizeof(client_addr);
@@ -311,7 +264,6 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        // Read the HTTP request
         char buffer[BUFFER_SIZE];
         ssize_t bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
         if (bytes_received < 0) {
@@ -321,7 +273,6 @@ int main(int argc, char *argv[]) {
         }
         buffer[bytes_received] = '\0';
 
-        // Parse the HTTP request
         char method[8], path[MAX_PATH_LENGTH], version[16];
         if (sscanf(buffer, "%7s %1023s %15s", method, path, version) != 3) {
             fprintf(stderr, "Failed to parse request\n");
@@ -329,7 +280,6 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        // Add the request to the queue
         add_request_to_queue(client_socket, path);
     }
 
